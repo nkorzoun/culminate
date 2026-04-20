@@ -51,7 +51,7 @@ def main(args):
     observation_time = Time.now() if args.time is None else Time(args.time, format='iso', scale='utc')
     
     # apply magnitude mask
-    mag_mask = catalog['Gmag'] <= args.magnitude if 'Gmag' in catalog.columns else np.ones(len(catalog), dtype=bool)
+    mag_mask = catalog['G'] <= args.magnitude if 'G' in catalog.columns else np.ones(len(catalog), dtype=bool)
     catalog = catalog[mag_mask].copy()
     n_mag = len(catalog)
     
