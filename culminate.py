@@ -27,7 +27,7 @@ def main(args):
         catalog = pd.DataFrame(hdul[1].data)
         cols = {
             'Name': 'Name', 
-            'Gmag': 'G mag',
+            'Gmag': 'G',
             'RAJ2000': 'RA J2000', 
             'DEJ2000': 'Dec J2000', 
             'Pol': 'Pol', 
@@ -132,7 +132,7 @@ def main(args):
     # sort
     sort_map = {
         'time': 'Culmination Time (UT)',
-        'G': 'G mag',
+        'G': 'G',
         'RA': 'RA J2000',
         'Dec': 'Dec J2000',
         'p': 'Pol',
@@ -169,7 +169,7 @@ if __name__ == "__main__":
     parser.add_argument("--location", "-l", type=str, default="WAO", choices=["WAO", "Bochum"], help="Location. WAO (default) or Bochum.")
     parser.add_argument("--magnitude", "-m", type=float, default=8, metavar="G-BAND", help="Limiting magnitude.")
     parser.add_argument("--polarization", "-p", type=float, default=1e-2, metavar="FRACTION", help="Minimum polarization fraction.")
-    parser.add_argument("--sort", "-s", type=str, default="RA", choices=["G", "RA", "Dec", "p", "PA", "El", "Moon"], help="Column to sort min to max.")
+    parser.add_argument("--sort", "-s", type=str, default="RA", choices=["G", "RA", "Dec", "Pol", "PA", "El", "Moon"], help="Column to sort min to max.")
     args = parser.parse_args()
     
     main(args)
