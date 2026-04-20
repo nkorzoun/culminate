@@ -5,17 +5,17 @@ Inspired by software written by Henrike Fleischhack for the VERITAS observatory.
 
 # Installation
 
-Install dependencies (`numpy`, `pandas`, `astropy`):
+Install dependencies (`python`, `numpy`, `pandas`, `astropy`):
 
+**Option 1: Using conda**
 ```
-conda install numpy pandas astropy
-```
-
-Or optionally, use the setup script to create a conda environment:
-
-```
-bash setup.sh
+conda create -n culminate python=3.10 numpy pandas astropy -y
 conda activate culminate
+```
+
+**Option 2: Using pip**
+```
+pip install numpy pandas astropy
 ```
 
 # Running the script
