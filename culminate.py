@@ -26,18 +26,22 @@ def main(args):
         hdul = fits.open('asu.fit')
         catalog = pd.DataFrame(hdul[1].data)
         cols = {
-            'Name': 'Name', 
+            'Name': 'Name',
             'Gmag': 'G',
-            'RAJ2000': 'RA J2000', 
-            'DEJ2000': 'Dec J2000', 
-            'Pol': 'Pol', 
-            'e_Pol': 'e_Pol', 
+            'RAJ2000': 'RA J2000',
+            'DEJ2000': 'Dec J2000',
+            'Pol': 'Pol',
+            'e_Pol': 'e_Pol',
             'PA': 'PA',
-            'e_PA': 'e_PA'
+            'e_PA': 'e_PA',
+            'N': 'N Obs'
         }
+        catalog['N'] = catalog.groupby('Star')['Star'].transform('size') # number of observations before dedup
         catalog=catalog.drop_duplicates(subset="Star") # duplicates -> same method to generate Table 5, but keeps star names
         catalog = catalog[[c for c in cols if c in catalog.columns]]
         catalog = catalog.rename(columns={k: v for k, v in cols.items() if k in catalog.columns})
+        if 'G' in catalog.columns:
+            catalog.loc[catalog['G'] == 0, 'G'] = np.nan
     except FileNotFoundError:
         print("Error: asu.fit not found")
         return
@@ -51,33 +55,52 @@ def main(args):
     observation_time = Time.now() if args.time is None else Time(args.time, format='iso', scale='utc')
     
     # apply magnitude mask
-    mag_mask = catalog['G'] <= args.magnitude if 'G' in catalog.columns else np.ones(len(catalog), dtype=bool)
+    mag_mask = (catalog['G'].isna() | (catalog['G'] <= args.magnitude)) if 'G' in catalog.columns else np.ones(len(catalog), dtype=bool)
     catalog = catalog[mag_mask].copy()
     n_mag = len(catalog)
     
     # apply polarization mask
-    pol_mask = catalog['Pol'] >= args.polarization if 'Pol' in catalog.columns else np.ones(len(catalog), dtype=bool)
+    pol_mask = catalog['Pol'] >= args.min_polarization if 'Pol' in catalog.columns else np.ones(len(catalog), dtype=bool)
+    if args.max_polarization is not None and 'Pol' in catalog.columns:
+        pol_mask &= catalog['Pol'] <= args.max_polarization
     catalog = catalog[pol_mask].copy()
     n_pol = len(catalog)
-    
+
+    # apply observation count mask
+    obs_mask = catalog['N Obs'] >= args.observations if 'N Obs' in catalog.columns else np.ones(len(catalog), dtype=bool)
+    catalog = catalog[obs_mask].copy()
+    n_obs = len(catalog)
+
     if len(catalog) == 0:
-        print("No stars match magnitude/polarization criteria")
+        print("No stars match magnitude/polarization/observation criteria")
         return
     
-    # dark time - find next sunset and sunrise
-    times = observation_time + np.linspace(0, 1.5, 2160) * u.day
+    # dark time - find the sunset/sunrise bracketing the observation time
+    # (search starts a day before observation_time so an already-dark observation time
+    # still resolves to the sunset that started the night, not the observation time itself)
+    times = observation_time - 1 * u.day + np.linspace(0, 2.5, 3600) * u.day
     sun = get_body('sun', times, location)
     frame = AltAz(obstime=times, location=location)
     sun_alt = sun.transform_to(frame).alt.deg
-    
-    sunset_idx = np.where(sun_alt < 0)[0]
-    sunset = times[sunset_idx[0]] if len(sunset_idx) > 0 else times[-1]
-    
-    if len(sunset_idx) > 0:
-        after_sunset = np.where(sun_alt[sunset_idx[0]:] > 0)[0]
-        sunrise = times[sunset_idx[0] + after_sunset[0]] if len(after_sunset) > 0 else times[-1]
+
+    below_horizon = sun_alt < 0
+    sunset_idxs = np.where(np.diff(below_horizon.astype(int)) == 1)[0] + 1
+    sunrise_idxs = np.where(np.diff(below_horizon.astype(int)) == -1)[0] + 1
+
+    obs_sun_alt = get_body('sun', observation_time, location).transform_to(
+        AltAz(obstime=observation_time, location=location)).alt.deg
+    currently_night = obs_sun_alt < 0
+
+    if currently_night:
+        past_sunsets = sunset_idxs[times[sunset_idxs].jd <= observation_time.jd]
+        sunset_idx = past_sunsets[-1] if len(past_sunsets) > 0 else (sunset_idxs[0] if len(sunset_idxs) > 0 else len(times) - 1)
     else:
-        sunrise = times[-1]
+        future_sunsets = sunset_idxs[times[sunset_idxs].jd > observation_time.jd]
+        sunset_idx = future_sunsets[0] if len(future_sunsets) > 0 else (sunset_idxs[-1] if len(sunset_idxs) > 0 else len(times) - 1)
+    sunset = times[sunset_idx]
+
+    future_sunrises = sunrise_idxs[times[sunrise_idxs].jd > sunset.jd]
+    sunrise = times[future_sunrises[0]] if len(future_sunrises) > 0 else times[-1]
 
     # find rise/peak/set times
     night_times = sunset + np.linspace(0, 1, 1000) * (sunrise - sunset)
@@ -148,24 +171,31 @@ def main(args):
         'p': 'Pol',
         'PA': 'PA',
         'El': 'Elevation',
-        'Moon': 'Moon Angle'
+        'Moon': 'Moon Angle',
+        'N': 'N Obs'
     }
     sort_col = sort_map.get(args.sort, 'Peak Time (UT)')
     catalog = catalog.sort_values(by=[sort_col])
     
     # print
-    print(catalog.to_string(index=False))
+    print(catalog.to_string(index=False, na_rep='--'))
     print()
     print(f"Observing date (UT): {observation_time}")
     print(f"Location: {args.location}")
     print(f"Sunset: {sunset.iso}")
     print(f"Sunrise: {sunrise.iso}")
-    
+
+    if args.csv:
+        catalog.to_csv(args.csv, index=False)
+        print(f"Saved table to {args.csv}")
+
     if args.verbose:
         print()
         print(f"Total catalog: {n_initial} stars")
         print(f"Magnitude mask (Gmag <= {args.magnitude}): {n_mag} stars")
-        print(f"Polarization mask (Pol >= {args.polarization}): {n_pol} stars")
+        pol_range = f"{args.min_polarization} <= Pol" + (f" <= {args.max_polarization}" if args.max_polarization is not None else "")
+        print(f"Polarization mask ({pol_range}): {n_pol} stars")
+        print(f"Observation count mask (N Obs >= {args.observations}): {n_obs} stars")
         print(f"Elevation mask (>= {args.elevation}°): {n_elev} stars")
         print(f"Dark time mask: {n_dark} stars")
 
@@ -177,8 +207,11 @@ if __name__ == "__main__":
     parser.add_argument("--time", "-t", type=str, default=None, metavar="ISO (UT)", help="Observation time (UT) in ISO format, e.g. \"2026-04-14 12:00:00\" (default: now).")
     parser.add_argument("--location", "-l", type=str, default="WAO", choices=["WAO", "Bochum"], help="Location. WAO (default) or Bochum.")
     parser.add_argument("--magnitude", "-m", type=float, default=8, metavar="G-BAND", help="Limiting magnitude.")
-    parser.add_argument("--polarization", "-p", type=float, default=1e-2, metavar="FRACTION", help="Minimum polarization fraction.")
-    parser.add_argument("--sort", "-s", type=str, default="RA", choices=["start", "peak", "end", "G", "RA", "Dec", "Pol", "PA", "El", "Moon"], help="Column to sort min to max.")
+    parser.add_argument("--min-polarization", "-pmin", type=float, default=1e-2, metavar="FRACTION", help="Minimum polarization fraction.")
+    parser.add_argument("--max-polarization", "-pmax", type=float, default=None, metavar="FRACTION", help="Maximum polarization fraction.")
+    parser.add_argument("--observations", "-n", type=int, default=1, metavar="COUNT", help="Minimum number of data points (observations) for a star.")
+    parser.add_argument("--sort", "-s", type=str, default="RA", choices=["start", "peak", "end", "G", "RA", "Dec", "Pol", "PA", "El", "Moon", "N"], help="Column to sort min to max.")
+    parser.add_argument("--csv", type=str, default=None, metavar="FILE", help="Export the table to a CSV file.")
     args = parser.parse_args()
     
     main(args)
