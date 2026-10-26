@@ -42,6 +42,9 @@ def main(args):
         catalog = catalog.rename(columns={k: v for k, v in cols.items() if k in catalog.columns})
         if 'G' in catalog.columns:
             catalog.loc[catalog['G'] == 0, 'G'] = np.nan
+        # RA = Dec = 0 is a placeholder for stars with no position in the catalog
+        no_pos = (catalog['RA J2000'] == 0) & (catalog['Dec J2000'] == 0)
+        catalog.loc[no_pos, ['RA J2000', 'Dec J2000']] = np.nan
     except FileNotFoundError:
         print("Error: asu.fit not found")
         return
@@ -105,24 +108,27 @@ def main(args):
     # find rise/peak/set times
     night_times = sunset + np.linspace(0, 1, 1000) * (sunrise - sunset)
     
-    peak_elevations = np.zeros(len(catalog))
-    rise_times = np.zeros(len(catalog), dtype=object)
-    peak_times = np.zeros(len(catalog), dtype=object)
-    set_times = np.zeros(len(catalog), dtype=object)
-    
-    # calculate elevations for all stars at all times
-    all_elevations = np.zeros((len(catalog), len(night_times)))
-    all_stars = SkyCoord(ra=catalog['RA J2000'].values*u.deg, dec=catalog['Dec J2000'].values*u.deg, frame='icrs')
-    
+    # stars with no position keep NaN/None for all position-dependent values
+    has_pos = catalog['RA J2000'].notna().values & catalog['Dec J2000'].notna().values
+    n_no_pos = int((~has_pos).sum())
+
+    peak_elevations = np.full(len(catalog), np.nan)
+    rise_times = np.full(len(catalog), None, dtype=object)
+    peak_times = np.full(len(catalog), None, dtype=object)
+    set_times = np.full(len(catalog), None, dtype=object)
+
+    # calculate elevations for all stars with positions at all times
+    all_elevations = np.zeros((has_pos.sum(), len(night_times)))
+    all_stars = SkyCoord(ra=catalog['RA J2000'].values[has_pos]*u.deg, dec=catalog['Dec J2000'].values[has_pos]*u.deg, frame='icrs')
+
     for j, night_time in enumerate(night_times):
         frame = AltAz(obstime=night_time, location=location)
         altaz = all_stars.transform_to(frame)
         all_elevations[:, j] = altaz.alt.deg
-    
+
     # find peak, rise, and set for each star
-    for i in range(len(catalog)):
-        elevations = all_elevations[i, :]
-        
+    for i, elevations in zip(np.flatnonzero(has_pos), all_elevations):
+
         # peak
         peak_idx = np.argmax(elevations)
         peak_elevations[i] = elevations[peak_idx]
@@ -136,8 +142,8 @@ def main(args):
             rise_times[i] = night_times[rise_idx]
             set_times[i] = night_times[set_idx]
     
-    # masks - only keep stars that reach the elevation threshold
-    elevation_mask = peak_elevations >= args.elevation
+    # masks - only keep stars that reach the elevation threshold (stars with no position pass)
+    elevation_mask = np.isnan(peak_elevations) | (peak_elevations >= args.elevation)
     catalog = catalog[elevation_mask].reset_index(drop=True)
     peak_elevations = peak_elevations[elevation_mask]
     rise_times = rise_times[elevation_mask]
@@ -147,18 +153,30 @@ def main(args):
     n_dark = len(catalog)
     
     # calculate moon distance at peak time for each star
-    moon_distances = np.zeros(len(catalog))
+    moon_distances = np.full(len(catalog), np.nan)
     for i, peak_time in enumerate(peak_times):
+        if peak_time is None:
+            continue
         moon = get_body('moon', peak_time, location)
         star = SkyCoord(ra=catalog['RA J2000'].iloc[i]*u.deg, dec=catalog['Dec J2000'].iloc[i]*u.deg, frame='icrs')
         moon_distances[i] = star.separation(moon.icrs).deg
+
+    # apply moon angle mask (stars with no position pass)
+    moon_mask = np.isnan(moon_distances) | (moon_distances >= args.moon_angle)
+    catalog = catalog[moon_mask].reset_index(drop=True)
+    rise_times = rise_times[moon_mask]
+    peak_times = peak_times[moon_mask]
+    set_times = set_times[moon_mask]
+    peak_elevations = peak_elevations[moon_mask]
+    moon_distances = moon_distances[moon_mask]
+    n_moon = len(catalog)
     
     # add columns
-    catalog["Start Time (UT)"] = [t.iso.split('.')[0][:-3] if t is not None else "N/A" for t in rise_times]
-    catalog["Peak Time (UT)"] = [t.iso.split('.')[0][:-3] for t in peak_times]
+    catalog["Start Time (UT)"] = [t.iso.split('.')[0][:-3] if t is not None else None for t in rise_times]
+    catalog["Peak Time (UT)"] = [t.iso.split('.')[0][:-3] if t is not None else None for t in peak_times]
     catalog["Elevation"] = np.round(peak_elevations, 1)
     catalog["Moon Angle"] = np.round(moon_distances, 1)
-    catalog["End Time (UT)"] = [t.iso.split('.')[0][:-3] if t is not None else "N/A" for t in set_times]
+    catalog["End Time (UT)"] = [t.iso.split('.')[0][:-3] if t is not None else None for t in set_times]
 
     # sort
     sort_map = {
@@ -168,7 +186,7 @@ def main(args):
         'G': 'G',
         'RA': 'RA J2000',
         'Dec': 'Dec J2000',
-        'p': 'Pol',
+        'Pol': 'Pol',
         'PA': 'PA',
         'El': 'Elevation',
         'Moon': 'Moon Angle',
@@ -198,6 +216,8 @@ def main(args):
         print(f"Observation count mask (N Obs >= {args.observations}): {n_obs} stars")
         print(f"Elevation mask (>= {args.elevation}°): {n_elev} stars")
         print(f"Dark time mask: {n_dark} stars")
+        print(f"Moon angle mask (>= {args.moon_angle}° at peak): {n_moon} stars")
+        print(f"Stars with no position (pass elevation/moon masks): {n_no_pos}")
 
 
 if __name__ == "__main__":
@@ -210,6 +230,7 @@ if __name__ == "__main__":
     parser.add_argument("--min-polarization", "-pmin", type=float, default=1e-2, metavar="FRACTION", help="Minimum polarization fraction.")
     parser.add_argument("--max-polarization", "-pmax", type=float, default=None, metavar="FRACTION", help="Maximum polarization fraction.")
     parser.add_argument("--observations", "-n", type=int, default=1, metavar="COUNT", help="Minimum number of data points (observations) for a star.")
+    parser.add_argument("--moon-angle", "-ma", type=float, default=0, metavar="DEGREES", help="Minimum angular separation from the Moon at peak time.")
     parser.add_argument("--sort", "-s", type=str, default="RA", choices=["start", "peak", "end", "G", "RA", "Dec", "Pol", "PA", "El", "Moon", "N"], help="Column to sort min to max.")
     parser.add_argument("--csv", type=str, default=None, metavar="FILE", help="Export the table to a CSV file.")
     args = parser.parse_args()
